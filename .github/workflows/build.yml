@@ -14,13 +14,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # Если в репозиторий загружен zip-архив (без распаковки), распаковываем его здесь
       - name: Unpack uploaded zip
         shell: pwsh
         run: |
           if (-not (Test-Path "src/DocuNova/DocuNova.csproj")) {
-            $zip = Get-ChildItem -Path . -Filter *.zip -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            # берём архив, загруженный последним коммитом; иначе — архив с самым новым содержимым по имени DocuNova*.zip
+            $zip = $null
+            $changed = git diff-tree --root --no-commit-id --name-only -r HEAD 2>$null | Where-Object { $_ -like '*.zip' }
+            if ($changed) { $zip = Get-Item ($changed | Select-Object -First 1) }
+            if (-not $zip) { $zip = Get-ChildItem -Path . -Filter *.zip -Recurse | Sort-Object @{ Expression = { $_.Name -like 'DocuNova*' }; Descending = $true }, LastWriteTime -Descending | Select-Object -First 1 }
             if (-not $zip) { throw "Не найдены исходники (папка src) и нет zip-архива с ними." }
             Write-Host "Распаковка $($zip.FullName)"
             Expand-Archive -Path $zip.FullName -DestinationPath "_unzipped" -Force
@@ -68,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $ver = "1.0.$env:GITHUB_RUN_NUMBER"
+          $ver = "1.1.$env:GITHUB_RUN_NUMBER"
           $isccArgs = @("/DAppVersion=$ver")
           if (Test-Path "redist/windowsdesktop-runtime-win-x64.exe") { $isccArgs += "/DWithRuntime" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" @isccArgs "installer\DocuNova.iss"
@@ -87,9 +93,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: DocuNova 1.0.${{ github.run_number }}
+          tag_name: v1.1.${{ github.run_number }}
+          name: DocuNova 1.1.${{ github.run_number }}
           body: |
+            Новое в 1.1: вкладки (файлы из Проводника открываются в одном окне), параллельный просмотр нескольких документов, заметно меньший расход оперативной памяти.
+
             **DocuNova-Setup-x64.exe** — установщик (рекомендуется): эскизы в Проводнике, ассоциации файлов, офлайн-установка .NET Desktop Runtime.
             **DocuNova-Portable-x64.zip** — переносная версия (нужен .NET Desktop Runtime 8 x64).
           files: dist/*
