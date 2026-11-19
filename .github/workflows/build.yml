@@ -51,7 +51,7 @@ jobs:
       - name: Check output
         shell: pwsh
         run: |
-          foreach ($f in @("publish/DocuNova.exe", "publish/DocuNova.Shell.comhost.dll", "publish/DocuNova.Core.dll")) {
+          foreach ($f in @("publish/DocuNova.exe", "publish/DocuNova.Shell.comhost.dll", "publish/DocuNova.Core.dll", "publish/pdfium.dll")) {
             if (-not (Test-Path $f)) { throw "Не найден $f" }
           }
           Get-ChildItem publish | Select-Object Name, Length | Format-Table -AutoSize
@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $ver = "1.4.$env:GITHUB_RUN_NUMBER"
+          $ver = "1.5.$env:GITHUB_RUN_NUMBER"
           $isccArgs = @("/DAppVersion=$ver")
           if (Test-Path "redist/windowsdesktop-runtime-win-x64.exe") { $isccArgs += "/DWithRuntime" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" @isccArgs "installer\DocuNova.iss"
@@ -93,9 +93,10 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.4.${{ github.run_number }}
-          name: DocuNova 1.4.${{ github.run_number }}
+          tag_name: v1.5.${{ github.run_number }}
+          name: DocuNova 1.5.${{ github.run_number }}
           body: |
+            Новое в 1.5: отображение документов переписано на движке PDFium — текст с субпиксельным сглаживанием ClearType «пиксель в пиксель», настраиваемый контраст тонких шрифтов, плавная прокрутка, прерывание ненужной отрисовки при быстрой прокрутке (без подвисаний); 12 однотонных пастельных тем; новая иконка.
             Новое в 1.4: документы открываются заметно быстрее — страницы PDF рисуются сразу в окончательной чёткости, две одновременно, видимые первыми; оглавление, метаданные и проверка безопасности больших файлов догружаются в фоне.
             Новое в 1.3: отображение страниц переписано с нуля — чёткая картинка «пиксель в пиксель» при любом масштабе и разрешении экрана, без ошибок потоков.
             Новое в 1.1: вкладки (файлы из Проводника открываются в одном окне), параллельный просмотр нескольких документов, заметно меньший расход оперативной памяти.
