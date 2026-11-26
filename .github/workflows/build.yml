@@ -8,6 +8,16 @@ on:
 permissions:
   contents: write
 
+# Повторные загрузки подряд не собираются параллельно: более ранняя сборка отменяется
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION_PREFIX: "1.7"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
 jobs:
   build:
     runs-on: windows-latest
@@ -17,25 +27,41 @@ jobs:
         with:
           fetch-depth: 2
 
-      # Если в репозиторий загружен zip-архив (без распаковки), распаковываем его здесь
+      # Если в репозиторий загружен zip-архив (без распаковки), распаковываем его здесь.
+      # Архив из последнего коммита всегда важнее уже лежащих в репозитории исходников —
+      # иначе после загрузки новой версии могла бы собраться старая.
       - name: Unpack uploaded zip
         shell: pwsh
         run: |
-          if (-not (Test-Path "src/DocuNova/DocuNova.csproj")) {
-            # берём архив, загруженный последним коммитом; иначе — архив с самым новым содержимым по имени DocuNova*.zip
-            $zip = $null
-            $changed = git diff-tree --root --no-commit-id --name-only -r HEAD 2>$null | Where-Object { $_ -like '*.zip' }
-            if ($changed) { $zip = Get-Item ($changed | Select-Object -First 1) }
-            if (-not $zip) { $zip = Get-ChildItem -Path . -Filter *.zip -Recurse | Sort-Object @{ Expression = { $_.Name -like 'DocuNova*' }; Descending = $true }, LastWriteTime -Descending | Select-Object -First 1 }
-            if (-not $zip) { throw "Не найдены исходники (папка src) и нет zip-архива с ними." }
+          $zip = $null
+          $changed = git -c core.quotepath=false diff-tree --root --no-commit-id --name-only -r HEAD 2>$null | Where-Object { $_ -like '*.zip' -and (Test-Path $_) }
+          if ($changed) { $zip = Get-Item ($changed | Sort-Object @{ Expression = { (Split-Path $_ -Leaf) -like 'DocuNova*' }; Descending = $true } | Select-Object -First 1) }
+          if (-not $zip -and -not (Test-Path "src/DocuNova/DocuNova.csproj")) {
+            # исходников нет — берём архив DocuNova*.zip (или любой другой) из репозитория
+            $zip = Get-ChildItem -Path . -Filter *.zip -Recurse | Where-Object { $_.FullName -notmatch '[\\/]_unzipped[\\/]' } |
+                   Sort-Object @{ Expression = { $_.Name -like 'DocuNova*' }; Descending = $true }, LastWriteTime -Descending | Select-Object -First 1
+          }
+          if ($zip) {
             Write-Host "Распаковка $($zip.FullName)"
+            if (Test-Path "_unzipped") { Remove-Item "_unzipped" -Recurse -Force }
             Expand-Archive -Path $zip.FullName -DestinationPath "_unzipped" -Force
             $proj = Get-ChildItem "_unzipped" -Recurse -Filter "DocuNova.csproj" | Select-Object -First 1
             if (-not $proj) { throw "В архиве нет проекта DocuNova.csproj" }
             $root = $proj.Directory.Parent.Parent.FullName
+            # старые исходники удаляются целиком, чтобы в сборку не попали файлы, которых в новой версии уже нет
+            foreach ($d in @("src", "installer")) { if (Test-Path $d) { Remove-Item $d -Recurse -Force } }
             Get-ChildItem $root -Force | ForEach-Object { Copy-Item $_.FullName -Destination . -Recurse -Force }
           }
+          if (-not (Test-Path "src/DocuNova/DocuNova.csproj")) { throw "Не найдены исходники (папка src) и нет zip-архива с ними." }
           Get-ChildItem src
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "$env:VERSION_PREFIX.$env:GITHUB_RUN_NUMBER"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Версия: $v"
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
@@ -43,10 +69,10 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Publish application
-        run: dotnet publish src/DocuNova/DocuNova.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:Version=1.6.${{ github.run_number }} -o publish
+        run: dotnet publish src/DocuNova/DocuNova.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:Version=${{ steps.ver.outputs.version }} -o publish
 
       - name: Publish Explorer thumbnail provider
-        run: dotnet publish src/DocuNova.Shell/DocuNova.Shell.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:Version=1.6.${{ github.run_number }} -o publish
+        run: dotnet publish src/DocuNova.Shell/DocuNova.Shell.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:Version=${{ steps.ver.outputs.version }} -o publish
 
       - name: Check output
         shell: pwsh
@@ -74,7 +100,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $ver = "1.6.$env:GITHUB_RUN_NUMBER"
+          $ver = "${{ steps.ver.outputs.version }}"
           $isccArgs = @("/DAppVersion=$ver")
           if (Test-Path "redist/windowsdesktop-runtime-win-x64.exe") { $isccArgs += "/DWithRuntime" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" @isccArgs "installer\DocuNova.iss"
@@ -90,12 +116,15 @@ jobs:
           name: DocuNova-Windows-x64
           path: dist/*
 
+      # Релиз публикуется только из основной ветки; сборки других веток доступны в артефактах
       - name: Publish release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6.${{ github.run_number }}
-          name: DocuNova 1.6.${{ github.run_number }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: DocuNova ${{ steps.ver.outputs.version }}
           body: |
+            Новое в 1.7: ряд вкладок прокручивается — кнопки ‹ › по краям (с удержанием), колесо и наклон колеса / тачпад, затухание краёв, список всех вкладок (Ctrl+Shift+Пробел), перетаскивание вкладок, Alt+1…9, возврат закрытой вкладки (Ctrl+Shift+T); при запуске открываются вкладки прошлого сеанса на тех же страницах, с тем же масштабом и параллельным просмотром; документы открываются на месте, где их читали, закладки запоминаются; история переходов назад / вперёд (Alt+← / Alt+→, боковые кнопки мыши); автопрокрутка (Ctrl+Shift+A); линейка чтения (Ctrl+U); 7 цветовых режимов страниц (тёплая ночь, мягкий зелёный, оттенки серого, высокий контраст для бледных сканов); скрытие пометок (Ctrl+Shift+H); правка пометок из списка (текст, цвет, толщина), экспорт пометок и цитат в Markdown / TXT; штампы с датой и свои штампы; шаг колеса мыши.
             Новое в 1.6: редактор PDF (Ctrl+M) — объединение нескольких PDF и изображений в один документ, перестановка страниц перетаскиванием, удаление, поворот, дублирование, вставка пустых страниц, извлечение выбранных страниц и разделение на файлы (страницы переносятся без потери качества); двустраничный разворот с отдельной первой страницей-обложкой (Ctrl+3 переключает режимы); новая оранжевая иконка; исправлена навигация и определение текущей страницы в развороте.
             Новое в 1.5: отображение документов переписано на движке PDFium — текст с субпиксельным сглаживанием ClearType «пиксель в пиксель», настраиваемый контраст тонких шрифтов, плавная прокрутка, прерывание ненужной отрисовки при быстрой прокрутке (без подвисаний); 12 однотонных пастельных тем; новая иконка.
             Новое в 1.4: документы открываются заметно быстрее — страницы PDF рисуются сразу в окончательной чёткости, две одновременно, видимые первыми; оглавление, метаданные и проверка безопасности больших файлов догружаются в фоне.
